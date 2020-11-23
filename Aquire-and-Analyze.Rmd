@@ -1,0 +1,558 @@
+---
+title: "ADA Aquire and Analyze"
+author: "AJ Eckmann"
+date: "April 1, 2020"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+## Executive Summary
+
+In this aquire and analyze project I looked at NCAA Basketball data from the 2020 season and worked on creating a model to predict the score between any two division 1 basketball teams. I pulled in box-score data for over 5,000 games from the 2020 season from basketball reference. I also scraped efficiency metrics from the KenPom website. Using the stats pulled from the box-scores I created season average tables for every team in Division 1, and I paired this with the efficiency metrics from KenPom. For my model, instead of simply predicting Win/Loss, I wanted to predict the actual score outcome. This seemed like the best approach, because I thought that using Points as the response variable would build a better model that using a binary W/L. I made this assumption because under the binary W/L prediction, when training the model, a 30 point win and a 2 point win will be treated the same, whereas in the points model, this can be accounted for more closely. I built a linear regression model with Points as the response variable using the 2020 NCAA Basketball Results. I trained my model on data that I had between the start of the season through the end of February. I left out the data for March and used this as a testing set. When I tested the model on the 386 games that happened in March, my model accurately predicted the winner 73.6% of the time (284 out of 386 games). In addition to the successful prediction model, I also found that Home Court Advantage was worth about 3.47 points in college basketball in the 2020 season, with a p-value of < 2e-16.
+
+## Introduction
+
+The question that I am trying to solve is, what factors (that we know pre-game), can we use to better predict the outcome of a NCAA Basketball game. As a huge college basketball fan, I frequently hear "defense wins championships" or "the best free throw shooting team wins", and I thought it would be really cool to see which of these stats have a significant impact that we can actually identify in a model.
+
+The data from sports-reference is game by game statistics for each team in division 1 basketball during the 2019-2020 season. The data from KenPom is efficiency data for all 353 division 1 teams for the 2019-2020 season.
+
+The original data from sports-reference is 1 row per game played, and listed stats such as FG, FGA, 3P, 3PA, etc for that specific game. Using Vlookups and AverageIfs in Excel, I used the game by game data to extract season averages for each team. Next, I created a new table with 1 row for each team for each game. The columns are: Team, Opponent, PTS (how many points they scored that game), Home (0 for away, 0.5 for neutral, 1 for home). After this, I appended the season averages for both the Team and Opponent, as well as the Ken Pom efficiency stats for both of these teams.
+
+Below is where I scraped/reformatted the KenPom dataset. I also printed the first few rows so you can get an idea of what it looks like.
+
+## Data
+
+```{r, include=FALSE}
+#install.packages("rvest")
+#install.packages("tidyverse")
+#install.packages("data.table")
+library(rvest)
+library(tidyverse)
+library(data.table)
+library(MASS)
+library(DAAG)
+```
+
+```{r}
+kenpom <- read_html("https://kenpom.com/index.php?y=2020")
+temp <- kenpom  %>%
+  html_table(header = FALSE)
+
+## Reformat the names
+
+temp[[1]][2,][7] = "AdjORk"
+temp[[1]][2,][9] = "AdjDRk"
+temp[[1]][2,][11] = "AdjTRk"
+temp[[1]][2,][13] = "LuckRk"
+temp[[1]][2,][14] = "SOSAdjEM"
+temp[[1]][2,][15] = "SOSAdjEM-Rk"
+temp[[1]][2,][16] = "SOSOppO"
+temp[[1]][2,][17] = "SOSOppORk"
+temp[[1]][2,][18] = "SOSOppD"
+temp[[1]][2,][19] = "SOSOppDRk"
+temp[[1]][2,][20] = "NCSOSAdjEM"
+temp[[1]][2,][21] = "NCSOSAdjEMRk"
+
+
+temp <- temp %>%
+  map(~ set_names(.x, nm = .x[2,]) %>% slice(-c(1, 2)))
+
+temp <- as.data.table(temp, keep.rownames=FALSE)
+
+t <- c()
+for (j in 1:nrow(temp)){
+  if (temp[j,1] == "Rk" ) {t <- c(t,as.numeric(j))}
+  else if (!(temp[j,1] > 0)) {t <- c(t,as.numeric(j))}}
+  
+temp <- temp[-t, ]
+temp$wins <- 0
+temp$losses <- 0
+
+for (j in 1:nrow(temp)){
+  spl <- str_split(temp[j][,4],"-")
+  temp[j][,22] <- as.numeric(spl[[1]][1])
+  temp[j][,23] <- as.numeric(spl[[1]][2])
+  temp[j][,4] = paste0("'", as.character(temp[j][,4]))}
+
+for(i in 1:nrow(temp)){
+  a = length(unlist(strsplit(temp[i,][[2]], " ")))
+  top = unlist(strsplit(temp[i,][[2]], " "))[-a]
+  seed = unlist(strsplit(temp[i,][[2]], " "))[a]
+  if (seed %in% c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16)){
+  temp[i,][[2]] = str_c(top, collapse = " ")}}
+
+temp = temp
+
+write.csv(temp, "C:/Users/ajeck/Documents/ADA/ADA-AandA/2020kp2.csv", row.names = FALSE)
+
+head(temp)
+```
+
+For reference, there are 353 Division 1 basketball teams, and there is one row per team in the KenPom dataset. A lot of the KenPom set is based on rankings, which I don't want to use in this regression, instead I will use the raw numbers that are continuous (these are called ratings). The four main ratings that I use in my models are:
+
+AdjEM - overall rating, higher score is better, (calculated as AdjO - AdjD), this causes multicollinearity issues if all 3 are included in a model,
+
+AdjO - offensive rating, as a factor of points per 100 possessions, a higher score indicates a better offense,
+
+AdjD - defensive rating, as a factor of points per 100 possessions, a lower score indicates a better defense,
+
+AdjT - Tempo rating, ie how fast the team plays, a higher score means a faster tempo.
+
+In the few plots below, we can see the strong correlation between higher ranked KenPom teams having higher AdjO scores, as well as lower AdjD scores. In the third plot I looked at the comparison of Off v Def, and as you can see, there are no real strong trends between having a good offense and having a good defense.
+
+```{r, echo =FALSE}
+ggplot(temp, aes(as.numeric(Rk), as.numeric(AdjO))) +
+  xlab("Rank") +
+  ylab("Adjusted Offensive Rating") +
+  geom_point() +
+  theme_dark() +
+  ggtitle("Ken Pom Rank vs. Offensive Rating") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(temp, aes(as.numeric(Rk), as.numeric(AdjD))) +
+  xlab("Rank") +
+  ylab("Adjusted Defensive Rating") +
+  geom_point() +
+  theme_dark() +
+  ggtitle("Ken Pom Rank vs. Defensive Rating") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(temp, aes(as.numeric(AdjO), as.numeric(AdjD))) +
+  xlab("Adjusted Offensive Rating") +
+  ylab("Adjusted Defensive Rating") +
+  geom_point() +
+  theme_dark() +
+  ggtitle("Offensive Rating vs. Defensive Rating") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+```
+
+In the plots below, I plotted the KenPom Rankings against the number of wins that the team had in the 2020 season as some further EDA. As can be seen in the plots, it appears that overall rank, high AdjO and low AdjD are all associated with more wins.
+
+```{r,echo=FALSE}
+ggplot(temp, aes(as.numeric(Rk), as.numeric(wins))) +
+  xlab("Rank") +
+  ylab("Wins") +
+  geom_point() +
+  theme_dark() +
+  ggtitle("2020 Ken Pom Ranking vs wins") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(temp, aes(as.numeric(AdjO), as.numeric(wins))) +
+  xlab("Adjusted Offensive Rating") +
+  ylab("Wins") +
+  geom_point() +
+  theme_dark() +
+  ggtitle("2020 Ken Pom Offensive Rating vs wins") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(temp, aes(as.numeric(AdjD), as.numeric(wins))) +
+  xlab("Adjusted Defensive Rating") +
+  ylab("Wins") +
+  geom_point() +
+  theme_dark() +
+  ggtitle("2020 Ken Pom Defensive Rating vs wins") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+### Reading in new data
+
+In order to perform my analysis, I pulled in the offensive and defensive season averages for each team that I created in Excel. To get these tables I pulled boxscore data from all of the games last season from basketballreference.com using excel, then I made two new CSVs (OFF and DEF) and used sumif / averageif statements to calculate each teams season averages from last year. These two tables (off_avg and def_avg) hold the same metrics, but off_avg is what the team averages in each of these categories per game, while def_avg is what this team gives up to their opponents in each of these categories per game. These tables are basically "FOR" (OFF) and "AGAINST" (DEF) averages, but I had already done the work using OFF/DEF by the time I did the write up so I will use that terminology throughout.
+
+Next, I took the KenPom output from earlier and reformatted the naming convention to match the spelling/names from the def_avg and off_avg csvs from basketball reference (I just used Vlookup in Excel). I was then able to merge these three data sets on "TEAM", to create a table of 353 rows (teams) and 69 variables (statistics/efficiency metrics).
+
+```{r, echo = FALSE}
+off_avg <- read.csv("C:/Users/ajeck/Documents/ADA/ADA-AandA/OffAvgs.csv")
+def_avg <- read.csv("C:/Users/ajeck/Documents/ADA/ADA-AandA/DefAvgs.csv")
+
+#took the kp2 output from above and reformatted the names to match the spelling/names from the def and off csvs above (I just used Vlookup in Excel)
+kp_fix <- read.csv("C:/Users/ajeck/Documents/ADA/ADA-AandA/2020kp2-reformat.csv")
+```
+
+```{r, echo = FALSE}
+#Rename Columns so they can be easily referred to
+
+colnames(off_avg) = c("TEAM", "W", "L", "O.FG", "O.FGA", "O.FGP", "O.2P", "O.2PA", "O.2PP", "O.3P", "O.3PA", "O.3PP","O.FT", "O.FTA", "O.FTP", "O.PTS", "O.OREB", "O.DREB", "O.TRB", "O.AST", "O.STL", "O.BLK", "O.TOV", "O.PF")
+colnames(def_avg) = c("TEAM", "D.W", "D.L", "D.FG", "D.FGA", "D.FGP", "D.2P", "D.2PA", "D.2PP", "D.3P", "D.3PA", "D.3PP","D.FT", "D.FTA", "D.FTP", "D.PTS", "D.OREB", "D.DREB", "D.TRB", "D.AST", "D.STL", "D.BLK", "D.TOV", "D.PF")
+```
+
+```{r, echo = FALSE}
+#Combine into a full dataset with 1 row per team (353 teams) and 69 total variables
+
+comb <- merge(off_avg,def_avg, by= "TEAM")
+full_data <- merge(kp_fix, comb, by= "TEAM")
+
+```
+
+I did a little more EDA on the new dataset just to ensure that the KenPom efficiency metrics were actually correlated with the season averages that I pulled, which they were. As can be seen below, higher AdjO is associated with more points scored, lower AdjD is associated with fewer points given up and AdjT is associated with more points scored, just as we would expect.
+
+```{r, echo = FALSE}
+ggplot(full_data, aes(as.numeric(AdjO), as.numeric(O.PTS))) +
+  xlab("Adjusted Offense") +
+  ylab("Deffensive Points Conce Per Game") +
+  geom_point() +
+  theme_dark() +
+  ggtitle("Adjusted Offense vs Points Per game") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(full_data, aes(as.numeric(AdjD), as.numeric(D.PTS))) +
+  xlab("Adjusted Defense") +
+  ylab("Defensive Points Per Game") +
+  geom_point() +
+  theme_dark() +
+  ggtitle("Adjusted Defense vs Defensive Points Per game") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(full_data, aes(as.numeric(AdjT), as.numeric(O.PTS))) +
+  xlab("Adjusted Tempo") +
+  ylab("Offense Points Per Game") +
+  geom_point() +
+  theme_dark() +
+  ggtitle("Adjusted Tempo vs Points Per game") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+```{r, echo=FALSE, include=FALSE}
+## More EDA Plots, but not included in final report
+
+ggplot(full_data, aes(as.numeric(Rk), as.numeric(O.PTS))) +
+  xlab("KenPom Rank") +
+  ylab("Offense Points Per Game") +
+  geom_point() +
+  theme_dark() +
+  ggtitle("2020 Ken Pom Ranking vs Points Per game") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(full_data, aes(as.numeric(Rk), as.numeric(D.PTS))) +
+  xlab("KenPom Rank") +
+  ylab("Defensive Points Allowed Per Game") +
+  geom_point() +
+  theme_dark() +
+  ggtitle("2020 Ken Pom Ranking vs Points Per game") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(full_data, aes(as.numeric(AdjD), as.numeric(D.PTS))) +
+  xlab("Adjusted Defense") +
+  ylab("Defensive Points Allowed Per Game") +
+  geom_point() +
+  theme_dark() +
+  ggtitle("Adjusted Defense vs Points Per game") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(full_data, aes(as.numeric(AdjO), as.numeric(D.PTS))) +
+  xlab("Adjusted Offense") +
+  ylab("Defensive Points Allowed Per Game") +
+  geom_point() +
+  theme_dark() +
+  ggtitle("Adjusted Offense vs Points Per game") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(full_data, aes(as.numeric(AdjT), as.numeric(D.PTS))) +
+  xlab("Adjusted Tempo") +
+  ylab("Defensive Points Allowed Per Game") +
+  geom_point() +
+  theme_dark() +
+  ggtitle("Adjusted Tempo vs Points Per game") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+## Methods
+The main method that I used in building my model was simple linear regression. I also tried using logistic regression with a binary W/L response, but these results were not near as successful as linear regression. To do this linear regression, I used game by game data that I pulled from basketball reference. Due to my lack of expertise in R, and the ease (my familiarity) of Vlookups in Excel I did some data manipulation of the boxscore data in excel before pulling it into R. First, I narrowed down the box score data that I had used for the season averages tables (that had game-level stats) and cut it to 6 variables (Date, Team, Opp, Result, PTS, Home). In this re-formatted datatable, there are 2 rows for each game (one row for each instance of Team v. Opp). In each row, the Pts and Home variables are with respect to Team (not Opp). The Home variable is 1 for home, 0.5 for nuetral and 0 for away.
+
+For example, if Duke played at Florida on 11/25/2020 and the final score was Duke 83 - Florda 79, there would be two entries for this game.
+
+Entry 1: Date = 11/25/2020, Team = Duke, Opp = Florida, PTS = 83, Home = 0 
+
+Entry 2: Date = 11/25/2020, Team = Florida, Opp = Duke, PTS = 79, Home = 0
+
+From here I appended the "FOR" (OFF) stats for Duke, and "AGAINST" (DEF) stats for Florida for entry 1 and vice versa for entry 2. I designed the data this way intentially, because I want to create a model that will predict PTS (not just binary W/L), so we can take into account margin. From the way that this model is set up, we are using PTS as the response variable (which is how many points that team scored in that specific matchup - ie Duke scoring 83 against Florida on 11/25/2020), and using the KenPom/season averages of both the TEAM and OPP to try to create a model to predict how many points they would score in a specific matchup, then we can compare PTS predictions and turn this into W/L. The idea is that the KenPom/Season Average stats will be available for us when we are predicting the points scored pre-game, so we want to regress on these averages/efficiency metrics, not the box score stats from that day (that we would have no way of knowing ahead of time).
+
+
+```{r, echo=FALSE}
+### GAMES Data
+
+games <- read.csv("C:/Users/ajeck/Documents/ADA/ADA-AandA/NCAAB-DATASET.csv")
+```
+
+Below is the full linear model, minus the team, opponent, result, and a few stats that would cause multicollinearity issues if included (For example, you can't have FT made, FT attemps and FT % because they are factors of one another). Additionally, it is important to note that I used TEAM and OPP to pull in the season averages and efficiency metrics, for those particular teams (for each row) so there is no reason to keep Team or Opp in the model. Additionally, I coded the data so that all the "FOR" (OFF) stats start with "O." and all the "AGAINST" (DEF) stats start with "D.". To further explain, in any given row of our data the "O.FG" variable is the season average "made field goals" for the team in the TEAM column. The "D.FG" variable is the season average "conceded field goals" for the team in the OPP column. The "O.FG" variable gives us an idea of how many field goals the team of interest 'TEAM' (who the PTS column that we are regressing on is associated with) scores on average, while the "D.FG" variable gives us an idea of how many field goals their opponent usually gives up. Both of these are useful in predicting how many points 'TEAM' will score.
+
+```{r}
+#Full Linear Model
+full_model <- lm(PTS ~ . - Date - TEAM - OPP - Result - O.AdjEM - D.AdjEM - O.3P - O.3PA - D.3PA - O.2P - O.FT - D.3P - D.2P - D.FT - O.TRB - D.TRB, data = games)
+summary(full_model)
+```
+
+I then experimented with many condensed forms of this model because, as shown above, many of the p-values in the full model are very high. I didn't include all these model outputs in the report for sake of space, but they are all in the RMD file.
+
+```{r, echo = FALSE, include=FALSE}
+#KenPom only model
+kp_model <- lm(PTS ~ O.AdjEM + O.AdjO + O.AdjD + O.AdjT + D.AdjEM + D.AdjO + D.AdjD + D.AdjT, data = games)
+summary(kp_model)
+```
+
+```{r, echo=FALSE, include = FALSE}
+#Adding Points averages to KenPom only model
+kp_model <- lm(PTS ~ O.PTS + D.PTS + O.AdjEM + O.AdjO + O.AdjD + O.AdjT + D.AdjEM + D.AdjO + D.AdjD + D.AdjT, data = games)
+summary(kp_model)
+```
+
+```{r, echo=FALSE, include = FALSE}
+#Adding Home Court to Points to KenPom only model
+kp_model <- lm(PTS ~ HOME + O.PTS + D.PTS + O.AdjEM + O.AdjO + O.AdjD + O.AdjT + D.AdjEM + D.AdjO + D.AdjD + D.AdjT, data = games)
+summary(kp_model)
+```
+
+```{r, echo = FALSE, include = FALSE}
+#Adding Home Court to Points to KenPom only model, taking out the AdjEM due to multicollinearity
+kp_model <- lm(PTS ~ HOME + O.PTS + D.PTS + O.AdjO + O.AdjD + O.AdjT + D.AdjO + D.AdjD + D.AdjT, data = games)
+summary(kp_model)
+```
+
+After playing around with the models for a while, I ran a couple of the better models through the stepAIC function in R. Below is one example of how the AIC backwards selection works from the base model 'fit'. As is shown below, my model here was improved by removing 'D.TOV', which I previously had in the model.
+
+```{r}
+fit <- lm(PTS ~ HOME + O.PTS + D.PTS + D.TOV + O.AdjO + O.AdjD + O.AdjT + D.AdjO + D.AdjD + D.AdjT, data=games)
+step <- stepAIC(fit, direction="both")
+step$anova # display results
+```
+
+In this next code block I ran a backwards selection AIC function on the (nearly) full-model. This is how I came up with my final model. I didn't print the full output and commented the code out for sake of space, but the back_selec model below was the result.
+
+```{r}
+#fit <- lm(PTS ~ . - Date - TEAM - OPP - Result - O.3P - O.2P - O.FT - D.3P - D.2P - D.FT - O.TRB - D.TRB, data=games)
+#step <- stepAIC(fit, direction="both")
+#step$anova # display results
+
+### Steps above do backwards selection to optimize AIC. This process is slow, and also prints out every step which takes up a lot of space.
+### I ran this once and then just copy and pasted the output so I didn't have to reprint it in the final report. The output is below:
+#PTS ~ O.FG + O.2PA + O.2PP + O.FTA + D.FG + D.FGP + D.FTA + D.PTS + D.ORB + D.TOV + O.AdjEM + O.AdjD + O.AdjT + D.AdjO + D.AdjD + D.AdjT + HOME
+
+back_selec <- lm(PTS ~ O.FG + O.2PA + O.2PP + O.FTA + D.FG + D.FGP + D.FTA + D.PTS + D.ORB + D.TOV + O.AdjEM + O.AdjD + O.AdjT + D.AdjO + D.AdjD +
+                               D.AdjT + HOME, data = games)
+
+summary(back_selec)
+
+```
+
+```{r, echo=FALSE}
+#Choose the model from backwards selection as the final model
+final_lin <- back_selec
+```
+
+## Results
+
+After finalizing my model, I first ran a k-fold cross validation (for the sake of legibility I only did 3 folds below, but I looked at all the way up to 10 in my RMD before finalizing the report). As can be seen in the plot below, it seems like our model did a pretty good job of predicting how many points would be scored, even in a 3-fold cross validation.
+
+```{r}
+# K-fold cross-validation
+cv.lm(games, final_lin, m=3, printit = FALSE, dots = FALSE, main="Actual Points Vs. Predicted Points") # 3 fold cross-validation
+```
+
+Next I wanted to actually see how accurate my model was at predicting a winner. I pulled out a testing set (the first 772 entries, which took place in March), and used all of the other data to train a model.
+
+```{r}
+test = games[1:772,] # all games in March
+train = games[773:nrow(games),] # all other games
+
+#final model as described in the Model section above
+train_lin <- lm(PTS ~ O.FG + O.2PA + O.2PP + O.FTA + D.FG + D.FGP + D.FTA + D.PTS + D.ORB + D.TOV + O.AdjEM + O.AdjD + O.AdjT + D.AdjO + D.AdjD +
+                               D.AdjT + HOME, data = train)
+
+#create a prediction column which is my prediction for the 'TEAM'
+test$pred <- predict.lm(train_lin,test)
+
+#Need some way to get the "Opp" score prediction on the same line so I can predict W/L, not just score
+#initialize 2 new variables
+test$pred2 <- 4
+test$pred2 <- 5
+
+#The way the data is set up, the two teams that played are stacked on top of each other. For example, if Duke and Florida played, their predictions would be in two different rows one where (TEAM = Duke and Opp = Floria) that predicts the Duke score and one where (TEAM = Florida and Opp = Duke) that predicts the Florida score. These rows will be 1 and 2 in the data set, and the next game will be rows 3 and 4, and so on.
+
+#Goes through and looks at the prediction in the row below and sets it equal to pred2
+for(i in 1:nrow(test)){
+  if(i == 1){
+    test$pred2[i] = 0
+  }
+  else{
+  test$pred2[i] <- test$pred[i-1]}}
+
+#Goes through and looks at the prediction in the row above and sets it equal to pred3
+for(i in 1:nrow(test)){
+  if(i == nrow(test)){
+    test$pred3[nrow(test)] = 0
+  }
+  else{
+  test$pred3[i] <- test$pred[i+1]}}
+
+#Now we just need to sort out it their opponent is in the row above or the row below, that way we know wheter to use pred2 or pred3
+test$oppPre <- 6
+for(i in 1:nrow(test)){
+  if(i %% 2 == 0){
+    test$oppPre[i] = test$pred2[i]
+  }
+  else{
+   test$oppPre[i] = test$pred3[i] 
+  }
+}
+
+#Now we predict win or lose based on our prediction compared to the prediction for the opponent
+test$preW <- 7
+for(i in 1:nrow(test)){
+  if(as.numeric(test$oppPre[i]) > as.numeric(test$pred[i])){test$preW[i] = 0} 
+  else{test$preW[i] = 1}}
+
+#Compare the W/L prediction to if they actually won or lost
+test$right <- 0
+for(i in 1:nrow(test)){
+  if(test$Result[i] ==  "W"){
+    if(test$preW[i] == 1){
+      test$right[i] = 1
+    }
+  }
+  if(test$Result[i] == "L"){
+    if(test$preW[i] == 0){
+      test$right[i] = 1}
+  }
+}
+
+#Mean of this will test us how often we predicted correctly
+mean(test$right)
+
+```
+
+As can be shown from the output above, in the 386 (772/2 rows per game) March games in 2020, our model predicted the correct winner 73.6% of the time. In a sport with as much variability as basketball, where we see big upsets all the time, this is a pretty accurate model.
+
+Next I designed a function that will take in two teams (team1 and team2) and who the home team is, and returns a data frame of a score prediction. I have not printed out how I created the function in the report output for the sake of space, but it is in the RMD file. Here is an example of how the function works:
+
+In this example I am predicting that a game between Duke and Kansas (held at Duke) will result in a 72.9 - 71.9 victory for Kansas. 
+
+```{r, echo = FALSE}
+predictor <- function(te1 = te1, te2 = te2, home_te1 = home_te1){
+  tname1 = te1
+  tname2 = te2
+for (i in 1:nrow(full_data)){
+  if(full_data[,1][i] == te1)
+  {myrow = i}
+}
+for (i in 1:nrow(full_data)){
+  if(full_data[,1][i] == te2)
+  {oprow = i}
+}
+oadjem <- as.numeric(full_data[myrow,][5])
+oadjd <- as.numeric(full_data[myrow,][8])
+oadjt <- as.numeric(full_data[myrow,][10])
+ofg <- as.numeric(full_data[myrow,][26])
+o2pa <- as.numeric(full_data[myrow,][30])
+o2pp <- as.numeric(full_data[myrow,][31])
+ofta <- as.numeric(full_data[myrow,][36])
+
+dfg <- as.numeric(full_data[oprow,][49])
+dfgp <- as.numeric(full_data[oprow,][51])
+dfta <- as.numeric(full_data[oprow,][59])
+dpts <- as.numeric(full_data[oprow,][61])
+doreb <- as.numeric(full_data[oprow,][62])
+dtov <- as.numeric(full_data[oprow,][68])
+dadjo <- as.numeric(full_data[oprow,][6])
+dadjd <- as.numeric(full_data[oprow,][8])
+dadjt <- as.numeric(full_data[oprow,][10])
+
+home <- home_te1
+
+team1 <- data.frame("Team" = te1,
+                    "O.FG" = ofg,
+                    "O.2PA" = o2pa,
+                    "O.2PP" = o2pp,
+                    "O.FTA" = ofta,
+                    "D.FG" = dfg,
+                    "D.FGP" = dfgp,
+                    "D.FTA" = dfta,
+                    "D.PTS" = dpts,
+                    "D.ORB" = doreb,
+                    "D.TOV" = dtov,
+                    "O.AdjEM" = oadjem,
+                    "O.AdjD" = oadjd,
+                    "O.AdjT" = oadjt,
+                    "D.AdjO" = dadjo,
+                    "D.AdjD" = dadjd,
+                    "D.AdjT" = dadjt,
+                    "HOME" = home)
+
+team1_pred <- predict.lm(final_lin, team1)
+
+myrow2= myrow
+
+myrow = oprow
+oprow = myrow2
+
+oadjem <- as.numeric(full_data[myrow,][5])
+oadjd <- as.numeric(full_data[myrow,][8])
+oadjt <- as.numeric(full_data[myrow,][10])
+ofg <- as.numeric(full_data[myrow,][26])
+o2pa <- as.numeric(full_data[myrow,][30])
+o2pp <- as.numeric(full_data[myrow,][31])
+ofta <- as.numeric(full_data[myrow,][36])
+
+dfg <- as.numeric(full_data[oprow,][49])
+dfgp <- as.numeric(full_data[oprow,][51])
+dfta <- as.numeric(full_data[oprow,][59])
+dpts <- as.numeric(full_data[oprow,][61])
+doreb <- as.numeric(full_data[oprow,][62])
+dtov <- as.numeric(full_data[oprow,][68])
+dadjo <- as.numeric(full_data[oprow,][6])
+dadjd <- as.numeric(full_data[oprow,][8])
+dadjt <- as.numeric(full_data[oprow,][10])
+
+home <- (1-home_te1)
+
+team2 <- data.frame("Team" = te2,
+                    "O.FG" = ofg,
+                    "O.2PA" = o2pa,
+                    "O.2PP" = o2pp,
+                    "O.FTA" = ofta,
+                    "D.FG" = dfg,
+                    "D.FGP" = dfgp,
+                    "D.FTA" = dfta,
+                    "D.PTS" = dpts,
+                    "D.ORB" = doreb,
+                    "D.TOV" = dtov,
+                    "O.AdjEM" = oadjem,
+                    "O.AdjD" = oadjd,
+                    "O.AdjT" = oadjt,
+                    "D.AdjO" = dadjo,
+                    "D.AdjD" = dadjd,
+                    "D.AdjT" = dadjt,
+                    "HOME" = home)
+
+team2_pred <- predict.lm(final_lin, team2)
+
+prediction_final <- data.frame(team1_pred, team2_pred)
+
+cnames <- c()
+cnames <- c(cnames,as.character(tname1),as.character(tname2))
+
+colnames(prediction_final) <- cnames
+
+return(prediction_final)
+}
+
+```
+
+```{r}
+## Built Predictor
+team1 = "Duke"
+team2 = "Kansas"
+home_te1 = 1 #1 means team1 is at home, 0 would mean team1 is away
+
+predictor(team1, team2, home_te1)
+```
+
+## Future Directions
+
+One thing that could be done to further this predictor would be associating the score predictions into a probability of victory. This would be cool to look at when filling out a March Madness bracket, because while the model may not predict the big underdog to win outright, it might give them a 40% chance, which could be used to determine if this was worth the risk of taking the underdog. I know that ESPN reports out what % of people pick each particular team, so we could use this information to help determine if it is worth the risk to take a big underdog with a decent chance of winning in order to get a one-up in your pool.
+
+Another cool future direction would be to pull in today's games from basketball reference and automate a predictor that could just scrape the games and come up with a prediction for each game in seconds.
+
